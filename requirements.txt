@@ -1,0 +1,23 @@
+# Python 3.12 + Windows: use TF>=2.16 (wheels exist) and allow modern numpy.
+# Do NOT pin numpy<2 with TF<2.16 — that combo fails metadata generation on 3.12.
+numpy>=1.26.4,<2.3
+pandas>=2.0,<3.0
+scikit-learn>=1.3
+matplotlib>=3.7
+seaborn>=0.13
+Pillow>=10.0
+tensorflow>=2.16,<2.20
+
+# Backend
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9
+sqlalchemy>=2.0
+
+# Frontend
+streamlit>=1.30
+requests>=2.31
+
+# Testing / CI
+pytest>=7.4
+httpx>=0.27

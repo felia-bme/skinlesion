@@ -1,0 +1,28 @@
+# Data (large; do not commit)
+data/
+*.jpg
+*.jpeg
+*.png
+!eda_outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Model / training outputs (large binary artifacts)
+models/*.keras
+models/*.h5
+models/*.pkl
+training_outputs/
+eda_outputs/
+predictions.db
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
