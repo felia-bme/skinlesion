@@ -10,6 +10,7 @@ Palette: background #f3f3f3, accents #7cbaca and #f08b33, text #000000.
 import os
 from html import escape
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -42,6 +43,9 @@ header[data-testid="stHeader"] { background: transparent; }
 .block-container { max-width: 900px; padding-top: 3rem; padding-bottom: 3rem; }
 hr { border-color: rgba(0,0,0,0.12); margin: 2rem 0 1.5rem; }
 [data-testid="stImage"] img { border-radius: 14px; }
+[data-testid="stVegaLiteChart"], [data-testid="stArrowVegaLiteChart"] {
+  border-radius: 14px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.05);
+  margin-top: 0.8rem; }
 
 /* Header */
 .app-header { display: flex; align-items: center; justify-content: center;
@@ -289,8 +293,39 @@ if uploaded is not None:
                 )
                 prediction_card(p)
 
-            chart_df = pd.DataFrame(rows).set_index("Lesion")[["Probability (%)"]]
-            st.bar_chart(chart_df, color=COLOR_BLUE)
+            chart_df = pd.DataFrame(rows)
+            chart = (
+                alt.Chart(chart_df)
+                .mark_bar(color=COLOR_BLUE, cornerRadiusTopLeft=6, cornerRadiusTopRight=6)
+                .encode(
+                    x=alt.X(
+                        "Lesion:N",
+                        sort=None,
+                        title=None,
+                        axis=alt.Axis(labelAngle=-30, labelLimit=220, labelPadding=8),
+                    ),
+                    y=alt.Y("Probability (%):Q", title="Probability (%)"),
+                    tooltip=["Lesion", "Probability (%)", "Characteristic"],
+                )
+                .properties(
+                    title="Prediction Probabilities by Lesion Type",
+                    height=320,
+                    # Space between the chart and the edge of the white background
+                    padding={"left": 28, "right": 28, "top": 24, "bottom": 24},
+                )
+                .configure(background="#ffffff")
+                .configure_view(strokeWidth=0)
+                .configure_title(
+                    fontSize=18, anchor="start", color=COLOR_TEXT, offset=18
+                )
+                .configure_axis(
+                    labelColor=COLOR_TEXT,
+                    titleColor=COLOR_TEXT,
+                    gridColor="#e6e6e6",
+                    domainColor="#cccccc",
+                )
+            )
+            st.altair_chart(chart, use_container_width=True)
 
         if result.get("high_risk_detected"):
             risk_codes = ", ".join(result.get("high_risk_classes", []))
