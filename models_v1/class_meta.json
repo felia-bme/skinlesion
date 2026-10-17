@@ -1,0 +1,38 @@
+{
+  "class_indices": {
+    "akiec": 0,
+    "bcc": 1,
+    "bkl": 2,
+    "df": 3,
+    "mel": 4,
+    "nv": 5,
+    "vasc": 6
+  },
+  "dx_full_name": {
+    "akiec": "Actinic keratoses / intraepithelial carcinoma",
+    "bcc": "Basal cell carcinoma",
+    "bkl": "Benign keratosis-like lesions",
+    "df": "Dermatofibroma",
+    "mel": "Melanoma",
+    "nv": "Melanocytic nevi",
+    "vasc": "Vascular lesions"
+  },
+  "dx_characteristics": {
+    "akiec": "precancerous",
+    "bcc": "malignant",
+    "bkl": "benign",
+    "df": "benign",
+    "mel": "malignant",
+    "nv": "benign",
+    "vasc": "benign"
+  },
+  "high_risk_classes": [
+    "akiec",
+    "bcc",
+    "mel"
+  ],
+  "img_size": [
+    224,
+    224
+  ]
+}

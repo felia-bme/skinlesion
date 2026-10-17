@@ -106,13 +106,47 @@ def _load_artifacts() -> dict[str, Any]:
     }
 
 
+_PIL_RESAMPLE = {
+    "nearest": Image.Resampling.NEAREST,
+    "bilinear": Image.Resampling.BILINEAR,
+    "bicubic": Image.Resampling.BICUBIC,
+    "lanczos": Image.Resampling.LANCZOS,
+    "box": Image.Resampling.BOX,
+    "hamming": Image.Resampling.HAMMING,
+}
+
+
+def _center_crop_box(width: int, height: int, target_w: int, target_h: int):
+    """Kotak potong tengah dengan rasio target (meniru keep_aspect_ratio di Keras)."""
+    crop_h = min(height, (width * target_h) // target_w)
+    crop_w = min(width, (height * target_w) // target_h)
+    left = (width - crop_w) // 2
+    top = (height - crop_h) // 2
+    return (left, top, left + crop_w, top + crop_h)
+
+
 def preprocess_image(image_bytes: bytes) -> np.ndarray:
-    """RGB convert -> resize 224x224 -> rescale 1/255 -> add batch dim."""
-    rescale = artifacts["scaler"].get("rescale", 1.0 / 255)
-    size = tuple(artifacts["scaler"].get("img_size", list(IMG_SIZE)))
+    """RGB convert -> (potong tengah) -> resize 224x224 -> rescale 1/255 -> batch dim.
+
+    Parameter dibaca dari scaler.pkl supaya sama dengan saat training. Scaler lama
+    (tanpa keep_aspect_ratio) tetap berjalan seperti sebelumnya, tanpa potong tengah.
+    """
+    scaler = artifacts["scaler"]
+    rescale = scaler.get("rescale", 1.0 / 255)
+    size = tuple(scaler.get("img_size", list(IMG_SIZE)))  # (tinggi, lebar)
+    keep_aspect = bool(scaler.get("keep_aspect_ratio", False))
+    resample = _PIL_RESAMPLE.get(
+        str(scaler.get("interpolation", "bilinear")).lower(),
+        Image.Resampling.BILINEAR,
+    )
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = img.resize(size, Image.Resampling.BILINEAR)
+    target_w, target_h = size[1], size[0]
+    if keep_aspect:
+        box = _center_crop_box(img.width, img.height, target_w, target_h)
+        img = img.resize((target_w, target_h), resample, box=box)
+    else:
+        img = img.resize((target_w, target_h), resample)
     arr = np.asarray(img, dtype=np.float32) * rescale
     return np.expand_dims(arr, axis=0)
 

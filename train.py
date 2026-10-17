@@ -31,6 +31,8 @@ from EDA import (
     BATCH_SIZE,
     N_CLASSES,
     DX_FULL_NAME,
+    KEEP_ASPECT_RATIO,
+    INTERPOLATION,
     load_metadata,
     preprocess_metadata,
     group_aware_split,
@@ -57,13 +59,18 @@ DX_CHARACTERISTICS = {
 }
 
 
-def compute_class_weights(train_df, class_indices: dict) -> dict:
-    """Inverse-frequency class weights keyed by generator class index."""
+def compute_class_weights(train_df, class_indices: dict, power: float = 0.5) -> dict:
+    """
+    Inverse-frequency class weights keyed by generator class index.
+    `power` melunakkan bobot: 1.0 = bobot "balanced" penuh, 0.5 = akar dari bobot
+    "balanced", 0.0 = tanpa class weight.
+    """
     y = train_df["dx"].map(class_indices).values
     classes = np.arange(N_CLASSES)
     weights = compute_class_weight(class_weight="balanced", classes=classes, y=y)
+    weights = weights ** power
     class_weight = {int(i): float(w) for i, w in enumerate(weights)}
-    print(f"[ClassWeight] {class_weight}")
+    print(f"[ClassWeight] power={power} -> {class_weight}")
     return class_weight
 
 
@@ -77,7 +84,10 @@ def build_model(num_classes: int = N_CLASSES, trainable_base: bool = False):
     base.trainable = trainable_base
 
     inputs = layers.Input(shape=(*IMG_SIZE, 3))
-    x = base(inputs, training=False)
+    # Input model tetap 0..1 (hasil generator / backend: piksel dibagi 255).
+    # Bobot ImageNet MobileNetV2 dilatih dengan input -1..1, jadi diubah di sini.
+    x = layers.Rescaling(scale=2.0, offset=-1.0, name="to_minus1_1")(inputs)
+    x = base(x, training=False)
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(0.3)(x)
     outputs = layers.Dense(num_classes, activation="softmax")(x)
@@ -86,18 +96,18 @@ def build_model(num_classes: int = N_CLASSES, trainable_base: bool = False):
     return model, base
 
 
-def get_callbacks(checkpoint_path: str):
+def get_callbacks(checkpoint_path: str, es_patience: int = 5, lr_patience: int = 2):
     return [
         callbacks.EarlyStopping(
             monitor="val_loss",
-            patience=5,
+            patience=es_patience,
             restore_best_weights=True,
             verbose=1,
         ),
         callbacks.ReduceLROnPlateau(
             monitor="val_loss",
             factor=0.5,
-            patience=2,
+            patience=lr_patience,
             min_lr=1e-7,
             verbose=1,
         ),
@@ -110,7 +120,7 @@ def get_callbacks(checkpoint_path: str):
     ]
 
 
-def train_phase1(model, train_gen, val_gen, class_weight, epochs=10):
+def train_phase1(model, train_gen, val_gen, class_weight, epochs=15):
     """Train with frozen base (feature extraction)."""
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
@@ -123,19 +133,22 @@ def train_phase1(model, train_gen, val_gen, class_weight, epochs=10):
         validation_data=val_gen,
         epochs=epochs,
         class_weight=class_weight,
-        callbacks=get_callbacks(checkpoint),
+        callbacks=get_callbacks(checkpoint, es_patience=5, lr_patience=2),
     )
     return history
 
 
-def train_phase2(model, base, train_gen, val_gen, class_weight, epochs=10, unfreeze_last_n=40):
+def train_phase2(
+    model, base, train_gen, val_gen, class_weight,
+    epochs=40, unfreeze_last_n=100, learning_rate=1e-4,
+):
     """Fine-tune by unfreezing the upper layers of the base model."""
     base.trainable = True
     for layer in base.layers[:-unfreeze_last_n]:
         layer.trainable = False
 
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
         loss="categorical_crossentropy",
         metrics=["accuracy"],
     )
@@ -145,7 +158,7 @@ def train_phase2(model, base, train_gen, val_gen, class_weight, epochs=10, unfre
         validation_data=val_gen,
         epochs=epochs,
         class_weight=class_weight,
-        callbacks=get_callbacks(checkpoint),
+        callbacks=get_callbacks(checkpoint, es_patience=8, lr_patience=3),
     )
     return history
 
@@ -277,9 +290,15 @@ def save_artifacts(model, label_encoder, class_indices, scaler=None, thresholds=
         pickle.dump(label_encoder, f)
     print(f"[Save] Label encoder -> {le_path}")
 
-    # Scaler placeholder: image rescale is fixed (1/255); saved for pipeline completeness
+    # Scaler placeholder: image rescale is fixed (1/255); saved for pipeline completeness.
+    # keep_aspect_ratio / interpolation dicatat agar backend memakai langkah yang sama.
     if scaler is None:
-        scaler = {"rescale": 1.0 / 255, "img_size": list(IMG_SIZE)}
+        scaler = {
+            "rescale": 1.0 / 255,
+            "img_size": list(IMG_SIZE),
+            "keep_aspect_ratio": KEEP_ASPECT_RATIO,
+            "interpolation": INTERPOLATION,
+        }
     scaler_path = os.path.join(MODELS_DIR, "scaler.pkl")
     with open(scaler_path, "wb") as f:
         pickle.dump(scaler, f)
@@ -332,8 +351,11 @@ def plot_history(histories, out_dir: str = OUTPUT_DIR):
 
 def main(
     run_eda_flag: bool = True,
-    phase1_epochs: int = 10,
-    phase2_epochs: int = 10,
+    phase1_epochs: int = 15,
+    phase2_epochs: int = 40,
+    finetune_lr: float = 1e-4,
+    unfreeze_last_n: int = 100,
+    class_weight_power: float = 0.5,
 ):
     os.makedirs(MODELS_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -357,7 +379,7 @@ def main(
     print(f"[Generator] class_indices: {class_indices}")
 
     # --- Step 6: class weights ---
-    class_weight = compute_class_weights(train_df, class_indices)
+    class_weight = compute_class_weights(train_df, class_indices, power=class_weight_power)
 
     # --- Step 7: model construction & training ---
     model, base = build_model(num_classes=N_CLASSES, trainable_base=False)
@@ -367,7 +389,12 @@ def main(
     hist1 = train_phase1(model, train_gen, val_gen, class_weight, epochs=phase1_epochs)
 
     print("\n=== Phase 2: Fine-tuning ===")
-    hist2 = train_phase2(model, base, train_gen, val_gen, class_weight, epochs=phase2_epochs)
+    hist2 = train_phase2(
+        model, base, train_gen, val_gen, class_weight,
+        epochs=phase2_epochs,
+        unfreeze_last_n=unfreeze_last_n,
+        learning_rate=finetune_lr,
+    )
 
     plot_history([hist1, hist2])
 
@@ -396,12 +423,20 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train HAM10000 skin lesion CNN")
     parser.add_argument("--no-eda", action="store_true", help="Skip EDA plots")
-    parser.add_argument("--phase1-epochs", type=int, default=10)
-    parser.add_argument("--phase2-epochs", type=int, default=10)
+    parser.add_argument("--phase1-epochs", type=int, default=15)
+    parser.add_argument("--phase2-epochs", type=int, default=40)
+    parser.add_argument("--finetune-lr", type=float, default=1e-4)
+    parser.add_argument("--unfreeze", type=int, default=100,
+                        help="Jumlah lapisan teratas MobileNetV2 yang dibuka di fase 2")
+    parser.add_argument("--class-weight-power", type=float, default=0.5,
+                        help="1.0 = balanced penuh, 0.5 = akar, 0.0 = tanpa class weight")
     args = parser.parse_args()
 
     main(
         run_eda_flag=not args.no_eda,
         phase1_epochs=args.phase1_epochs,
         phase2_epochs=args.phase2_epochs,
+        finetune_lr=args.finetune_lr,
+        unfreeze_last_n=args.unfreeze,
+        class_weight_power=args.class_weight_power,
     )

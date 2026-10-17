@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from scipy.stats import chi2_contingency
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_class_weight
@@ -35,6 +36,11 @@ IMAGE_DIRS = [
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 32
 N_CLASSES = 7
+
+# Resize tanpa mengubah bentuk citra: citra dipotong di tengah sesuai rasio
+# target (persegi), baru diperkecil. Backend HARUS memakai langkah yang sama.
+KEEP_ASPECT_RATIO = True
+INTERPOLATION = "bilinear"
 
 # Nama panjang tiap kode kelas dx, untuk pelaporan dan visualisasi
 DX_FULL_NAME = {
@@ -135,7 +141,7 @@ def _stratified_group_indices(df: pd.DataFrame, test_size: float, random_state: 
     """
     Stratified split by lesion group: assign each lesion to train or hold-out while
     preserving class proportions of lesion-level dx labels.
-    Falls back to GroupShuffleSplit if StratifiedGroupKFold is unavailable.
+    Falls back to GroupShuffleSplit if StratifiedGroupKFold fails (a warning is printed).
     """
     lesion_labels = _lesion_level_label(df)
     y = lesion_labels.to_numpy()
@@ -160,7 +166,9 @@ def _stratified_group_indices(df: pd.DataFrame, test_size: float, random_state: 
             if best is None or score < best[0]:
                 best = (score, train_idx, test_idx)
         return best[1], best[2]
-    except Exception:
+    except Exception as exc:
+        print(f"[Split] WARNING: StratifiedGroupKFold gagal ({exc!r}); "
+              f"memakai GroupShuffleSplit (TIDAK stratified).")
         gss = GroupShuffleSplit(
             n_splits=1, test_size=test_size, random_state=random_state
         )
@@ -197,6 +205,9 @@ def build_image_generators(train_df, val_df, test_df):
     """
     Membuat generator citra dengan normalisasi (rescale 1/255) dan augmentasi data
     pada set training untuk mengurangi dampak ketidakseimbangan kelas minoritas.
+
+    Catatan: generator menghasilkan nilai 0..1. Penyesuaian ke rentang -1..1 yang
+    dibutuhkan bobot MobileNetV2 dilakukan di dalam model (lihat build_model).
     """
     if not TF_AVAILABLE:
         raise ImportError(
@@ -218,6 +229,7 @@ def build_image_generators(train_df, val_df, test_df):
     common_args = dict(
         x_col="image_path", y_col="dx", target_size=IMG_SIZE,
         batch_size=BATCH_SIZE, class_mode="categorical",
+        keep_aspect_ratio=KEEP_ASPECT_RATIO, interpolation=INTERPOLATION,
     )
     train_gen = train_datagen.flow_from_dataframe(train_df, **common_args, shuffle=True)
     val_gen = eval_datagen.flow_from_dataframe(val_df, **common_args, shuffle=False)
@@ -227,6 +239,22 @@ def build_image_generators(train_df, val_df, test_df):
 
 
 # 3. EXPLORATORY DATA ANALYSIS (EDA)
+
+def cramers_v(a: pd.Series, b: pd.Series) -> float:
+    """Cramér's V (0..1, dengan koreksi bias) untuk dua variabel kategorikal."""
+    table = pd.crosstab(a, b)
+    if table.shape[0] < 2 or table.shape[1] < 2:
+        return np.nan
+    chi2 = chi2_contingency(table, correction=False)[0]
+    n = table.values.sum()
+    phi2 = chi2 / n
+    r, k = table.shape
+    phi2_corr = max(0.0, phi2 - ((k - 1) * (r - 1)) / (n - 1))
+    r_corr = r - ((r - 1) ** 2) / (n - 1)
+    k_corr = k - ((k - 1) ** 2) / (n - 1)
+    denom = min(k_corr - 1, r_corr - 1)
+    return float(np.sqrt(phi2_corr / denom)) if denom > 0 else np.nan
+
 
 def run_eda(df: pd.DataFrame, out_dir: str = "eda_outputs"):
     """Menghasilkan visualisasi EDA utama dan menyimpannya sebagai file gambar."""
@@ -272,17 +300,29 @@ def run_eda(df: pd.DataFrame, out_dir: str = "eda_outputs"):
     plt.savefig(os.path.join(out_dir, "04_lokasi_anatomi.png"))
     plt.close()
 
-    # (e) Heatmap korelasi antar fitur numerik/encoded sederhana.
-    #     dropna() di sini mengecualikan baris ber-age kosong HANYA dari
-    #     perhitungan korelasi ini, bukan dari dataset/training CNN secara
-    #     keseluruhan (age memang tidak diimputasi, lihat preprocess_metadata).
+    # (e) Asosiasi antar fitur dengan Cramér's V.
+    #     Heatmap korelasi Pearson pada kategori yang diberi nomor urut abjad
+    #     tidak bermakna, jadi dipakai ukuran asosiasi untuk kategori. Usia
+    #     dikelompokkan dulu; baris ber-age kosong hanya dikeluarkan dari pasangan
+    #     yang memuat age (bukan dari dataset training).
+    tmp = df[["age", "sex", "localization", "dx"]].copy()
+    tmp["age"] = pd.cut(tmp["age"], bins=[0, 20, 40, 60, 80, 100], include_lowest=True)
+    tmp = tmp.rename(columns={"age": "age_group"})
+    cols = list(tmp.columns)
+    assoc = pd.DataFrame(index=cols, columns=cols, dtype=float)
+    for i in cols:
+        for j in cols:
+            if i == j:
+                assoc.loc[i, j] = 1.0
+            else:
+                pair = tmp[[i, j]].dropna()
+                assoc.loc[i, j] = cramers_v(pair[i], pair[j])
+
     plt.figure(figsize=(6, 5))
-    corr_cols = ["age", "sex_encoded", "localization_encoded", "dx_label"]
-    corr = df[corr_cols].dropna().corr()
-    sns.heatmap(corr, annot=True, cmap="coolwarm", vmin=-1, vmax=1)
-    plt.title("Korelasi Antar Fitur (Encoded)")
+    sns.heatmap(assoc, annot=True, fmt=".2f", cmap="Blues", vmin=0, vmax=1)
+    plt.title("Asosiasi Antar Fitur (Cramér's V)")
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "05_heatmap_korelasi.png"))
+    plt.savefig(os.path.join(out_dir, "05_heatmap_asosiasi.png"))
     plt.close()
 
     print(f"[EDA] Visualisasi disimpan pada folder: {out_dir}/")
